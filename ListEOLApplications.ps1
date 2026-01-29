@@ -1,102 +1,71 @@
 <# =====================================================================
- Sensor-ListEOLApplications.ps1  (Local File Version)
- -----------------------------------------------------------------------
+ Sensor-ListEOLApplications.ps1  (Hard-coded JSON path, no controller gating)
+
  PURPOSE
-  - Read the local JSON produced by Build-TaniumEOLInventory.ps1 and
-    emit rows for Reporting:
-      App|Version|EolDate|IsEol
+  - Read a local JSON file (written by your builder job) and emit rows
+    for Reporting/Dashboards in the format:
+        App|Version|EolDate|IsEol
 
  PARAMETERS
-  - JsonPath: Full path to local eol_inventory.json (no URLs)
-  - OnlyEol : If set, print only IsEol = "Yes"
-  - MaxRows : Safety cap for extremely large files
-  - ControllerName: If set and current host doesn't match, prints "Skip"
-    (prevents duplicate rows if the sensor is targeted broadly).
+  - OnlyEol : If set, emit only rows where IsEol = "Yes".
+  - MaxRows : Safety cap for very large outputs (default 1,000,000).
 
- ROBUSTNESS
-  - Validates path, enforces size/row caps, catches and reports errors
-    without throwing unhandled exceptions.
+ OUTPUT
+  - "App|Version|EolDate|IsEol" per application row found in JSON.
+  - "None" if no rows exist after filtering.
+  - "Error: <message>" on file/parse issues (never throws).
 
- USAGE EXAMPLE (Tanium)
-  - Create a PowerShell sensor with this body.
-  - Parameter "JsonPath" default: C:\ProgramData\Tanium\EOL\eol_inventory.json
-  - Ask from the controller only:
-    Get Sensor-ListEOLApplications("C:\ProgramData\Tanium\EOL\eol_inventory.json", OnlyEol, ControllerName:"TANIUM-CONTROLLER1")
+ NOTES
+  - The set of endpoints to run on is controlled entirely by your Tanium
+    targeting; there is no host gating in the script.
  ===================================================================== #>
 
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory=$true)]
-  [ValidateNotNullOrEmpty()]
-  [string]$JsonPath,
-
   [switch]$OnlyEol,
 
   [ValidateRange(1,1000000)]
-  [int]$MaxRows = 1000000,
-
-  [string]$ControllerName
+  [int]$MaxRows = 1000000
 )
 
+# >>> HARD-CODED STANDARD PATH (aligned with builder) <<<
+$JsonPath = 'C:\ProgramData\Tanium\EOL\eol_inventory.json'
+
+# Safety limits to protect the console
+$MaxFileBytes = 200MB
+
 try {
-  # 1) Optional single-host gating to avoid duplicate result rows
-  if ($ControllerName) {
-    $me = $env:COMPUTERNAME
-    if ($me -ne $ControllerName) {
-      Write-Output "Skip"
-      return
-    }
-  }
-
-  # 2) Validate local path and reasonable size (e.g., 200 MB cap)
-  if (-not (Test-Path -Path $JsonPath -PathType Leaf)) {
-    Write-Output "Error: JSON path not found"
-    return
-  }
+  # 1) Validate presence & size
+  if (-not (Test-Path -Path $JsonPath -PathType Leaf)) { 'Error: JSON path not found'; return }
   $file = Get-Item -LiteralPath $JsonPath -ErrorAction Stop
-  if ($file.Length -gt 200MB) {
-    Write-Output "Error: JSON file too large"
-    return
-  }
+  if ($file.Length -gt $MaxFileBytes) { 'Error: JSON file too large'; return }
 
-  # 3) Read and parse JSON safely
+  # 2) Read & parse JSON
   $raw = Get-Content -LiteralPath $JsonPath -Raw -Encoding UTF8
-  if ([string]::IsNullOrWhiteSpace($raw)) {
-    Write-Output "Error: JSON file is empty"
-    return
-  }
+  if ([string]::IsNullOrWhiteSpace($raw)) { 'Error: JSON file is empty'; return }
+
   $data = $null
   try { $data = $raw | ConvertFrom-Json -ErrorAction Stop }
-  catch { Write-Output ("Error: invalid JSON - {0}" -f $_.Exception.Message); return }
+  catch { "Error: invalid JSON - $($_.Exception.Message)"; return }
 
-  if ($null -eq $data.apps) {
-    Write-Output "Error: invalid JSON (missing 'apps')"
-    return
-  }
+  if ($null -eq $data.apps) { "Error: invalid JSON (missing 'apps')"; return }
 
-  # 4) Filter and cap
+  # 3) Optionally filter to only EOL items; cap the output size
   $rows = @($data.apps)
-  if ($OnlyEol) {
-    $rows = $rows | Where-Object { $_.is_eol -eq 'Yes' }
-  }
-  if ($rows.Count -gt $MaxRows) {
-    $rows = $rows[0..($MaxRows-1)]
-  }
+  if ($OnlyEol) { $rows = $rows | Where-Object { $_.is_eol -eq 'Yes' } }
 
-  # 5) Emit lines for Reporting: App|Version|EolDate|IsEol
-  if (-not $rows -or $rows.Count -eq 0) {
-    Write-Output "None"
-    return
-  }
+  if (-not $rows -or $rows.Count -eq 0) { 'None'; return }
+  if ($rows.Count -gt $MaxRows) { $rows = $rows[0..($MaxRows - 1)] }
+
+  # 4) Emit: App|Version|EolDate|IsEol
   foreach ($r in $rows) {
-    $app = [string]$r.app
-    if ([string]::IsNullOrWhiteSpace($app)) { continue }
+    $app = [string]$r.app; if ([string]::IsNullOrWhiteSpace($app)) { continue }
     $ver = [string]$r.version
     $eol = [string]$r.eol_date
-    $iso = [string]$r.is_eol
-    "{0}|{1}|{2}|{3}" -f $app, $ver, $eol, $iso
+    $iso = [string]$r.is_eol  # "Yes"/"No"
+    '{0}|{1}|{2}|{3}' -f $app, $ver, $eol, $iso
   }
 }
 catch {
-  Write-Output ("Error: {0}" -f $_.Exception.Message)
+  "Error: $($_.Exception.Message)"
 }
